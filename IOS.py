@@ -4,10 +4,8 @@ import sys
 import file_control
 from login_network_devices import ConnHandler as ch
 import pandas as pd
-from system_information import IosSi
 
-
-class IosPii:
+class IosType:
     dt_now = datetime.datetime.now().strftime('%Y%m%d%H%M')
     
     def __init__(self):
@@ -26,7 +24,7 @@ class IosPii:
                 for ip in device_list:
                     pulled_phy_interfaces_lines = []
                     config = self.connhandle.login_ios_def(ip,self.uname,self.passwd).send_command(ginDict.get("cmd_to_send"))
-                    host_conf = IosSi().hostname_sys_info(ip)
+                    host_conf = self.hostname_sys_info(ip)
                     host_conf = host_conf.split('')[1].replace('-', '_')
                     pulled_phy_interfaces_lines.append(host_conf)
                     list_str = list(config.split("inter"))
@@ -67,7 +65,7 @@ class IosPii:
                     leave_only_int_name = []
                     config_01 = self.connhandle.login_ios_def(ip,self.uname,self.passwd).send_command("sho ip int br")
                     config_02 = self.connhandle.login_ios_def(ip,self.uname,self.passwd).send_command("sho int status")
-                    host_conf = IosSi().hostname_sys_info(ip)
+                    host_conf = self.hostname_sys_info(ip)
                     host_conf = host_conf.split('')[1].replace('-', '_')
                     self.connhandle.login_ios_def(ip,self.uname,self.passwd).disconnect()
                     leave_only_int_name.append(host_conf)
@@ -401,6 +399,49 @@ class IosPii:
                 print(output)
                 print("#####################DONE#####################")
 
+    def system_config_tmpl_filler(self,params:dict):
+        auth_config_pre = []
+        with open(params.get("config_templ_file"), "r") as auth_config:
+            for auth_line in auth_config:
+                auth_config_pre.append(auth_line)
+
+        device_IPs = file_control.ingest_list_of_ipaddrs(params.get("device_ip_file"))
+        for ip in device_IPs:
+            step01_list = []
+            step02_list = []
+            intf_name_from_ip = self.get_ip_from_intf(ip)
+            hostname_info = self.hostname_sys_info(ip)
+            for line02 in auth_config_pre:
+                if params.get("config_value_finder01") in line02:
+                    blank_filled = line02.replace(params.get("config_value_finder01"), intf_name_from_ip)
+                    step01_list.append(blank_filled)
+                else:
+                    step01_list.append(line02)
+
+            for line05 in step01_list:
+                line06 = "{} \n".format(line05)
+                step02_list.append(line06)
+
+            output_dir = file_control.folder_create(folder_path=f"sctf{params['foldername']}")
+            host_conf = hostname_info.split('')[1].replace('-', '_')
+            host_filename = f"{output_dir}\{host_conf}_gcs_{self.dt_now}.txt"
+            with open(host_filename, 'w+') as host_write:
+                host_write.write(hostname_info + "\n")
+                for line07 in step02_list:
+                    host_write.write(line07)
+                print(f"#####################NEW CONFIGURATION SCRIPT SAVED TO {host_filename}##################### \n")
+
+                if params.get("push_choice") and params.get("push_choice") == "Y":
+                    print("#####################STARTING CONFIGURATION PUSH TO {}#####################".format(hostname_info))
+                    output = self.connhandle.login_ios_def(ip, self.uname, self.passwd).send_config_set(step01_list)
+                    print(output)
+                    print("#####################DONE#####################")
+
+    def get_ip_from_intf(self, ip):
+        raw_intf = self.connhandle.login_ios_def(ip, self.uname, self.passwd).send_command(f"show ip int br | i {ip}")
+        intf_name = re.sub(" .*", "", raw_intf)
+        return intf_name
+
     def hostname_sys_info(self, ip):
         hostname = self.connhandle.login_ios_def(ip, self.uname, self.passwd).send_command("sh run | i ^hostname")
         hostname = hostname.lstrip()
@@ -468,6 +509,37 @@ class IosPii:
 
             print("#####################NEW CONFIGURATION SCRIPT SAVED TO {}##################### \n".format(host_filename))
 
+    def save_configuration_state(self, scsDict:dict):
+        confg_copy = []
+        output_dir = file_control.folder_create(folder_path="scs_data")
+        with open(scsDict.get("ip_list_file")) as device_list:
+            for ip in device_list:
+                cmd_send = self.connhandle.login_ios_def(ip, self.uname, self.passwd).send_command(scsDict.get("config_cmmd"))
+                hostname = self.hostname_sys_info(ip)
+                list_cmd = list(cmd_send.split("\n"))
+                for line01 in list_cmd:
+                    if line01.startswith("Building"): pass
+                    elif line01.startswith("Current configuration :"): pass
+                    elif line01.startswith("!"): pass
+                    else: confg_copy.append(line01)
+
+                if scsDict.get("is_output_file_needed"):
+                    host_conf = hostname.split('')[1].replace('-', '_')
+                    con_filename = f"{output_dir}\{host_conf}_{scsDict.get('appended_file_name')}_{self.dt_now}.txt"
+                    with open(con_filename, "w+") as conf_file:
+                        for line02 in confg_copy:
+                            new_line_insert = line02 + "\n"
+                            conf_file.write(new_line_insert)
+                        print("#####################CONFIG SAVED TO {}#####################".format(con_filename))
+                
+                # if you need to save a copy of config directly on the device
+                if scsDict.get("config_save_nvram") and scsDict.get("config_save_nvram") == "yes":
+                    save_file_name = f'copy run flash:scs_old_config_{scsDict.get("type_of_config")}'
+                    output = self.connhandle.login_ios_def(ip, self.uname, self.passwd).send_command_timing(save_file_name)
+                    if 'Destination filename' in output:
+                        output += self.connhandle.login_ios_def(ip, self.uname, self.passwd).send_command_timing("\n")
+                        print(f"#####################CONFIG SAVED TO flash:/{save_file_name}#####################\n")
+
     def config_file_mannipulator(self,config_output:str,strip_by):
         config_split = config_output.split(strip_by)
         return config_split
@@ -501,7 +573,7 @@ class IosPii:
 
 if __name__ == "__main__":
 
-    ios = IosPii()
+    ios = IosType()
     # ios.get_mac_addres_table("device_ip_test.txt")
     # ios.combine_files_into_one('mac address',"DEVICE INFORMATION",'.csv')
     # file_control.remove_item_from_txt('NEW CONFIGURATION SCRIPT',removeite='shut',overwrite=True)
