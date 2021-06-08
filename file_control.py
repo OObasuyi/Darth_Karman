@@ -87,5 +87,3 @@ def get_file(file:str,type):
         return retfile
     else:
         return None
-
-
