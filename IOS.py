@@ -9,7 +9,7 @@ class IosType:
     dt_now = datetime.datetime.now().strftime('%Y%m%d%H%M')
     
     def __init__(self):
-        self.connhandle = ch()
+        self.connhandle = ch('IOS')
         self.uname = self.connhandle.cred_dict.get('username')
         self.passwd = self.connhandle.cred_dict.get('password')
 
@@ -25,7 +25,7 @@ class IosType:
                     pulled_phy_interfaces_lines = []
                     config = self.connhandle.login_ios_def(ip,self.uname,self.passwd).send_command(ginDict.get("cmd_to_send"))
                     host_conf = self.hostname_sys_info(ip)
-                    host_conf = host_conf.split('')[1].replace('-', '_')
+                    host_conf = host_conf.split(' ')[1].replace('-', '_')
                     pulled_phy_interfaces_lines.append(host_conf)
                     list_str = list(config.split("inter"))
                     for line01 in list_str:
@@ -66,7 +66,7 @@ class IosType:
                     config_01 = self.connhandle.login_ios_def(ip,self.uname,self.passwd).send_command("sho ip int br")
                     config_02 = self.connhandle.login_ios_def(ip,self.uname,self.passwd).send_command("sho int status")
                     host_conf = self.hostname_sys_info(ip)
-                    host_conf = host_conf.split('')[1].replace('-', '_')
+                    host_conf = host_conf.split(' ')[1].replace('-', '_')
                     self.connhandle.login_ios_def(ip,self.uname,self.passwd).disconnect()
                     leave_only_int_name.append(host_conf)
                     list_str01 = list(config_01.split("\n"))
@@ -115,7 +115,7 @@ class IosType:
                 print(sys.exc_info()[1])
                 continue
             host_conf = self.hostname_sys_info(ip)
-            host_conf = host_conf.split('')[1].replace('-', '_')
+            host_conf = host_conf.split(' ')[1].replace('-', '_')
             pre_interf_list.append(host_conf)
             list_str = list(intf_conf.split("inter"))
             for line02 in list_str:
@@ -291,8 +291,8 @@ class IosType:
                 step02_list.append(line05)
 
             output_dir = file_control.folder_create(folder_path=f'ictf_{params["foldername"]}')
-            host_conf = host_conf.split('')[1].replace('-','_')
-            host_filename = f"{output_dir}/{output_dir}_{host_conf}_ICS_{self.dt_now}.txt"
+            host_conf = host_conf.split(' ')[1].replace('-','_')
+            host_filename = f"{output_dir}/{host_conf}_ICS_{self.dt_now}.txt"
             with open(host_filename,'w+') as host_write:
                 for line07 in step02_list:
                     host_write.write(line07)
@@ -385,7 +385,7 @@ class IosType:
                 if line03.startswith('interface'): line03 = '\n' + line03 + '\n'
                 step02_list.append(line03)
             output_dir = file_control.folder_create(folder_path=f'dcfi_{params["foldername"]}')
-            host_conf = host_conf.split('')[1].replace('-', '_')
+            host_conf = host_conf.split(' ')[1].replace('-', '_')
             host_filename = f"{output_dir}/{host_conf}_dcfi_{self.dt_now}.txt"
             with open(host_filename, 'w+') as host_write:
                 host_write.write(host_conf + "\n")
