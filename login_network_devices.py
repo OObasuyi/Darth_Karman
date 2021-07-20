@@ -31,8 +31,9 @@ class ConnHandler:
             for k in cdict['secret_stuff']:
                 if list(k.keys())[0] == type_:
                     return k[type_]
-                else:
-                    raise Exception
+
+            # if it couldnt find any matches raise an execption
+            raise Exception
 
         def _internal_pull_creds_02(cdict):
             cdump = self._pull_cred_helper(type_)
@@ -104,3 +105,6 @@ class ConnHandler:
                     elif 'user' in error:
                         print(f'LFD_LND: {"#"*50} Incorrect username and password {"#"*50}')
                         self.pull_creds(type_='fpr',rmdata=True)
+
+
+
