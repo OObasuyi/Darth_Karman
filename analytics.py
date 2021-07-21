@@ -170,7 +170,8 @@ class NetCap:
 
 
 if __name__ == '__main__':
-    n = NetCap('en0')
+    listener = 'INTERFACE'
+    n = NetCap(listener)
     # n.save_stream_to_db()
     # n.create_visuals()
     # n.process_spooler()
