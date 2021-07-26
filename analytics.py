@@ -1,5 +1,7 @@
 import datetime
 import ipaddress
+from sys import argv,executable,version_info
+from os import execv
 from socket import gethostbyaddr
 from threading import Thread
 from time import sleep
@@ -17,6 +19,8 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 from sqlalchemy import create_engine, text
 from login_network_devices import ConnHandler as ch
+from waitress import serve
+from log_collector import Log_Collector
 
 class NetCap:
     '''this module analyzes network flow and performs some ML and basic visualizations to the dataset still a WIP'''
@@ -27,32 +31,35 @@ class NetCap:
         self.passwd = self.connhandle.cred_dict.get('password')
         self.inet = inet
         self.database = 'analytics'
-        self.db_url = f'mysql+mysqlconnector://{self.uname}:{self.passwd}@127.0.0.1:3306'
+        self.db_url = f"mysql+mysqlconnector://{self.uname}:{self.passwd}@127.0.0.1:3306"
         self.engine = create_engine(self.db_url, pool_recycle=3600)
         self.table_name = 'flow_data'
         self._check_db_existance()
+        self.logC = Log_Collector()
 
 
     def save_stream_to_db(self):
-        online_streamer = NFStreamer(source=self.inet,statistical_analysis=True, splt_analysis=10,n_dissections=30)
-        for f in online_streamer:
-            key = f.keys()
-            val = f.values()
-            flow = dict(zip(key,val))
-            flow = pd.DataFrame([flow])
-            flow.replace(r'^\s*$','unknown', regex=True,inplace=True)
-            for col in flow.columns:
-                if isinstance(flow[col][0],list):
-                    colID = 1
-                    for i in flow[col][0]:
-                        flow[f'{col}_item_{colID}'] = i
-                        colID += 1
-                    flow.drop(columns=[col],inplace=True)
-            flow.drop(columns=['id','expiration_id'], inplace=True)
-            flow['timestamp'] = datetime.datetime.now().replace(microsecond=0)
-            flow['resolv_dst'] = flow.dst_ip.apply(lambda ip: self._val_ip(ip, 'reverse_dns'))
-            flow['resolv_src'] = flow.src_ip.apply(lambda ip: self._val_ip(ip, 'reverse_dns'))
-            flow.to_sql(name=self.table_name, con=self.engine, if_exists='append', index=False)
+        while True:
+            online_streamer = NFStreamer(source=self.inet,statistical_analysis=True, splt_analysis=10,n_dissections=30)
+            for f in online_streamer:
+                key = f.keys()
+                val = f.values()
+                flow = dict(zip(key,val))
+                flow = pd.DataFrame([flow])
+                flow.replace(r'^\s*$','unknown', regex=True,inplace=True)
+                for col in flow.columns:
+                    if isinstance(flow[col][0],list):
+                        colID = 1
+                        for i in flow[col][0]:
+                            flow[f'{col}_item_{colID}'] = i
+                            colID += 1
+                        flow.drop(columns=[col],inplace=True)
+                flow.drop(columns=['id','expiration_id'], inplace=True)
+                flow['timestamp'] = datetime.datetime.now().replace(microsecond=0)
+                flow['resolv_dst'] = flow.dst_ip.apply(lambda ip: self._val_ip(ip, 'reverse_dns'))
+                flow['resolv_src'] = flow.src_ip.apply(lambda ip: self._val_ip(ip, 'reverse_dns'))
+                flow.to_sql(name=self.table_name, con=self.engine, if_exists='append', index=False)
+
 
     def _db_managment(self):
         while True:
@@ -60,9 +67,8 @@ class NetCap:
             try:
                 with self.engine.connect() as conn:
                     conn.execute(text(f"DELETE FROM {self.table_name} where timestamp <= '{rollback_period}'"))
-            except:
-                # need to open an logging mechasism like tyr
-                pass
+            except Exception as error:
+                self.logC.logger.exception('dbm',exc_info=True)
             sleep(86400)  # perform database pruning everyday once a day
 
     def _check_db_existance(self):
@@ -70,7 +76,6 @@ class NetCap:
             conn.execute(f"CREATE DATABASE IF NOT EXISTS {self.database}")
         self.db_url = self.db_url + f'/{self.database}'
         self.engine = create_engine(self.db_url, pool_recycle=3600)
-
 
     def cluster_traffic_type(self):
         '''clean the df to only include ints,transform into 2D array,cluster the datapoints, find the optimal silhoute, groupby the new labels '''
@@ -83,6 +88,7 @@ class NetCap:
         label = kmean.fit_predict(x)
         u_labels = np.unique(label)
         cluster_groups = ptt.groupby(by=u_labels)
+        #todo: give each unique str feature s like src_ip,applicaiton,etc a int then plug that in 
 
     def _score_silhoutee(self,x):
         sil = []
@@ -107,6 +113,7 @@ class NetCap:
         nodes_step1 = nodes[nodes['src_ip'].apply(lambda ip: self._val_ip(ip, f'version{str(type)}')) != 0]
         return nodes_step1
 
+    #todo: need to add a toggle where we can choose what timeframe
     def create_visuals(self):
         self.app.layout = html.Div([html.H1('Byte Usage by Destination IP'),
                                    dcc.Graph(id = 'ipv4-graph',animate=True),
@@ -125,7 +132,24 @@ class NetCap:
             scat6 = px.scatter(nodes_v6, x=nodes_v6.dst_ip, y=nodes_v6.bidirectional_bytes, hover_data=[nodes_v6.src_ip, nodes_v6.src_port, nodes_v6.dst_port, nodes_v6.application_name, nodes_v6.resolv_dst, nodes_v6.resolv_src, nodes_v6.timestamp])
             return scat6
 
-        self.app.run_server(debug=True, use_reloader=False)
+        # this is gonna be a hack since I cant figure out for now how to release the port in a timely manner when we are restarting the script
+        port = 8050
+        erCount = 0
+        while True:
+            if 8050 >= port <= 8055:
+                try:
+                    serve(self.app.server, host='0.0.0.0', port=port)
+                except:
+                    self.logC.logger.critical(f"{'*' * 10}WAITING TO GRAB USE PORT:{port} PLEASE WAIT{'*' * 10}")
+                    sleep(5)
+                    serve(self.app.server,host='0.0.0.0', port=port)
+            else:
+                # well try this process three times after which well just stop the program
+                erCount += 1
+                port = 8050
+                if erCount >= 3:
+                    self.logC.logger.critical(f"{'*' * 10}CANT GET A PORT!!! SHUTTING DOWN SERVER{'*' * 10}")
+                    raise SystemExit
 
     def _val_ip(self,ip:str,sevice:str):
         if sevice == 'reverse_dns':
@@ -157,23 +181,66 @@ class NetCap:
             except:
                 return False
 
+    def am_i_alive_check(self):
+        # Check if all process are still running OKAY if not restart
+
+        # restart func non-accessible besides this func
+        def _restart():
+            current_ver = version_info
+            current_ver = f'python{current_ver[0]}.{current_ver[1]}'
+
+            self.logC.logger.critical(f"{'*'*10}TRYING TO RESTART{'*'*10}")
+            execv(executable, [current_ver] + argv)
+
+        def _shutdown():
+            self.logC.logger.critical(f"{'*' * 10}TRYING TO SHUTDOWN{'*' * 10}")
+            raise SystemExit
+
+        sleep(300)  # sleep 5M at start before starting in case we are running on old data on first try
+        while True:
+            #check last DB write
+            last_ts = None
+            try:
+                dt_now = datetime.datetime.now().replace(microsecond=0)
+                write_period = (dt_now - datetime.timedelta(hours=12)).strftime('%Y-%m-%d %H:%M:%S')
+                with self.engine.connect() as conn:
+                    last_ts = conn.execute(text(f"SELECT timestamp FROM {self.table_name} "
+                                      f"where timestamp >= '{write_period}' "
+                                      f"ORDER BY timestamp "
+                                      f"DESC LIMIT 1"))
+
+                try:
+                    last_ts = [ts for ts in last_ts][0]
+                except:
+                    self.logC.logger.critical(f"{'*'*10}DATABASE HASN'T BEEN WRITTEN TO IN 12HRS STALE DATA!{'*'*10}")
+                    _restart()
+            except Exception as error:
+                self.logC.logger.exception('alive_check',exc_info=True)
+                _shutdown()
+            sleep(3600)  # sleep 1hr
+
+
     def process_spooler(self):
+        save2db = Thread(target=self.save_stream_to_db, )
+        save2db.daemon = True
+        save2db.start()
+
         pruning = Thread(target=self._db_managment, )
         pruning.daemon = True
         pruning.start()
 
-        save2db = Thread(target=self.save_stream_to_db, )
-        # save2db.daemon = True
-        save2db.start()
+        visuals = Thread(target=self.create_visuals, )
+        visuals.daemon = True
+        visuals.start()
 
-
-
+        avail_check = Thread(target=self.am_i_alive_check, )
+        avail_check.start()
 
 if __name__ == '__main__':
-    listener = 'INTERFACE'
-    n = NetCap(listener)
+    n = NetCap('INTERFACE')
     # n.save_stream_to_db()
     # n.create_visuals()
-    # n.process_spooler()
+    # n.am_i_alive_check()
+    n.process_spooler()
     # n._db_managment()
     # n.cluster_traffic_type()
