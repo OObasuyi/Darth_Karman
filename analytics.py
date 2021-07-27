@@ -13,10 +13,12 @@ import plotly.express as px
 from dash import Dash
 from dash.dependencies import Input, Output
 from ipwhois import IPWhois
+from matplotlib import pyplot as plt
 from nfstream import NFStreamer
 from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
+from sklearn.feature_selection import SelectKBest,chi2
+from scipy.spatial.distance import cdist
 from sqlalchemy import create_engine, text
 from login_network_devices import ConnHandler as ch
 from waitress import serve
@@ -25,18 +27,17 @@ from log_collector import Log_Collector
 class NetCap:
     '''this module analyzes network flow and performs some ML and basic visualizations to the dataset still a WIP'''
     app = Dash(__name__)
-    def __init__(self,inet,):
+    def __init__(self,inet,db_url='127.0.0.1'):
         self.connhandle = ch('db')
         self.uname = self.connhandle.cred_dict.get('username')
         self.passwd = self.connhandle.cred_dict.get('password')
         self.inet = inet
         self.database = 'analytics'
-        self.db_url = f"mysql+mysqlconnector://{self.uname}:{self.passwd}@127.0.0.1:3306"
+        self.db_url = f"mysql+mysqlconnector://{self.uname}:{self.passwd}@{db_url}:3306"
         self.engine = create_engine(self.db_url, pool_recycle=3600)
         self.table_name = 'flow_data'
         self._check_db_existance()
         self.logC = Log_Collector()
-
 
     def save_stream_to_db(self):
         while True:
@@ -60,7 +61,6 @@ class NetCap:
                 flow['resolv_src'] = flow.src_ip.apply(lambda ip: self._val_ip(ip, 'reverse_dns'))
                 flow.to_sql(name=self.table_name, con=self.engine, if_exists='append', index=False)
 
-
     def _db_managment(self):
         while True:
             rollback_period = (datetime.datetime.now().replace(microsecond=0) - datetime.timedelta(days=60)).strftime('%Y-%m-%d %H:%M:%S')
@@ -78,31 +78,76 @@ class NetCap:
         self.engine = create_engine(self.db_url, pool_recycle=3600)
 
     def cluster_traffic_type(self):
-        '''clean the df to only include ints,transform into 2D array,cluster the datapoints, find the optimal silhoute, groupby the new labels '''
+        #TODO: NEED TO LABEL THE ROWS SO WE CAN CLASSIFY THEM as Ad,MALICIOUS TYPE TRAFFIC? MAYBE USE A TRAINING SET FROM https://github.com/shramos/Awesome-Cybersecurity-Datasets
         ptt = pd.read_sql(self.table_name, self.db_url)
-        x = ptt.drop(columns=[col for col in ptt.columns if ptt[col].dtype != (np.int64 or np.float64)])
-        pca = PCA(2)
-        x = pca.fit_transform(x)
-        sil = self._score_silhoutee(x) # use if needed to find optimal K
+        ptt.drop(columns=['timestamp', 'resolv_dst', 'resolv_src', 'dst_mac', 'dst_oui','src_mac', 'src_oui','protocol', 'ip_version','vlan_id', 'bidirectional_first_seen_ms', 'bidirectional_last_seen_ms',],inplace=True)
+
+        # reassamble SPLIT packets in orignal list format
+        direction = []
+        piat = []
+        ps = []
+        all_items = {'piat':piat,'ps':ps,'direction':direction}
+        for litem in [col for col in ptt.columns.tolist() if 'item' in col]:
+            if 'splt_direction' in litem:
+                direction.append(litem)
+            elif 'splt_piat' in litem:
+                piat.append(litem)
+            elif 'splt_ps' in litem:
+                ps.append(litem)
+
+        def add_list_items(x,v):
+            return sum([x[i] for i in v])
+
+        for k,v in all_items.items():
+            ptt[k] = ptt.apply(lambda x: add_list_items(x,v),axis=1) # add the items in the SPLT list
+        # drop the old SPLT columns
+        ptt.drop(columns=[i for v in all_items.values() for i in v],inplace=True)
+        x = ptt.apply(lambda x: pd.factorize(x)[0]) # turn all the columns in a integer representation to
+        # sil = self.find_optimal_K(x,'elbow') # use if needed to find optimal K
+        bestfeatures = SelectKBest(score_func=chi2,k=10)
+        fit = bestfeatures.fit(x.drop(columns=['application_name']), x.application_name)
+        featureScores = pd.concat([pd.DataFrame(x.columns), pd.DataFrame(fit.scores_)], axis=1)
+        featureScores.columns = ['colN', 'score']
+        featureScores.sort_values(by='score',ascending=False,inplace=True)
+        featureScores.reset_index(inplace=True,drop=True)
+        featureScores = featureScores.head(20).colN.tolist()
+        # were only using a subset of important features now
+        x = x[featureScores]
         kmean = KMeans(n_clusters=10)
         label = kmean.fit_predict(x)
-        u_labels = np.unique(label)
-        cluster_groups = ptt.groupby(by=u_labels)
-        #todo: give each unique str feature s like src_ip,applicaiton,etc a int then plug that in 
+        ptt['cluster_id'] = label # assign the cluster ID we predicted to a new column
+        cluster_groups = ptt.groupby('cluster_id')
+        return cluster_groups # returns a pandas group opject we can pull the K-cluster by using the get_groups() function
 
-    def _score_silhoutee(self,x):
+    def find_optimal_K(self,x,type_):
+        distortions = []
+        inertias = []
+        mapping1 = {}
+        mapping2 = {}
         sil = []
         kmax = 50
-        for k in range(2, kmax + 1):
-            kmeans = KMeans(n_clusters=k).fit(x)
-            labels = kmeans.labels_
-            sil.append(silhouette_score(x, labels, metric='euclidean'))
-        return sil
-
+        if type_ == 'silhouette_score':
+            for k in range(2, kmax + 1):
+                kmeans = KMeans(n_clusters=k).fit(x)
+                labels = kmeans.labels_
+                sil.append(silhouette_score(x, labels, metric='euclidean',sample_size=int(len(x) / 4 ))) #if its a huge dataset it will take some time
+            return sil
+        elif type_ == 'elbow':
+            # faster elbow method https://www.geeksforgeeks.org/elbow-method-for-optimal-value-of-k-in-kmeans/
+            for k in range(2, kmax + 1):
+                kmeans = KMeans(n_clusters=k).fit(x)
+                distortions.append(sum(np.min(cdist(x, kmeans.cluster_centers_,'euclidean'), axis=1)) / x.shape[0])
+                inertias.append(kmeans.inertia_)
+                mapping1[k] = sum(np.min(cdist(x, kmeans.cluster_centers_,'euclidean'), axis=1)) / x.shape[0]
+                mapping2[k] = kmeans.inertia_
+            plt.plot(range(2, kmax + 1), distortions, 'bx-')
+            plt.xlabel('Values of K')
+            plt.ylabel('Distortion')
+            plt.title('The Elbow Method using Distortion')
+            plt.show()
 
     def classify_traffic(self):
-        # TODO: use it classify ads as a test?
-        # TODO: need sample ad data
+        # TODO: this will work with cluster
         pass
 
     def _extract_data(self,type:int):
@@ -219,7 +264,6 @@ class NetCap:
                 _shutdown()
             sleep(3600)  # sleep 1hr
 
-
     def process_spooler(self):
         save2db = Thread(target=self.save_stream_to_db, )
         save2db.daemon = True
@@ -237,10 +281,12 @@ class NetCap:
         avail_check.start()
 
 if __name__ == '__main__':
-    n = NetCap('INTERFACE')
+    interface = ''
+    dburl = ''
+    n = NetCap(interface)
     # n.save_stream_to_db()
     # n.create_visuals()
     # n.am_i_alive_check()
-    n.process_spooler()
+    # n.process_spooler()
     # n._db_managment()
-    # n.cluster_traffic_type()
+    n.cluster_traffic_type()
