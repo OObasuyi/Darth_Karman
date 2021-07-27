@@ -10,10 +10,10 @@ import dash_html_components as html
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from dash import Dash
 from dash.dependencies import Input, Output
 from ipwhois import IPWhois
-from matplotlib import pyplot as plt
 from nfstream import NFStreamer
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
@@ -103,7 +103,7 @@ class NetCap:
         # drop the old SPLT columns
         ptt.drop(columns=[i for v in all_items.values() for i in v],inplace=True)
         x = ptt.apply(lambda x: pd.factorize(x)[0]) # turn all the columns in a integer representation to
-        # sil = self.find_optimal_K(x,'elbow') # use if needed to find optimal K
+        sil = self.find_optimal_K(x,'elbow') # use if needed to find optimal K
         bestfeatures = SelectKBest(score_func=chi2,k=10)
         fit = bestfeatures.fit(x.drop(columns=['application_name']), x.application_name)
         featureScores = pd.concat([pd.DataFrame(x.columns), pd.DataFrame(fit.scores_)], axis=1)
@@ -140,11 +140,10 @@ class NetCap:
                 inertias.append(kmeans.inertia_)
                 mapping1[k] = sum(np.min(cdist(x, kmeans.cluster_centers_,'euclidean'), axis=1)) / x.shape[0]
                 mapping2[k] = kmeans.inertia_
-            plt.plot(range(2, kmax + 1), distortions, 'bx-')
-            plt.xlabel('Values of K')
-            plt.ylabel('Distortion')
-            plt.title('The Elbow Method using Distortion')
-            plt.show()
+            fig = go.Figure(data=go.Scatter(x=list(range(2, kmax + 1)), y=distortions,mode='lines+markers'))
+            fig.update_xaxes(title_text="K Size",title_standoff=25)
+            fig.update_yaxes(title_text="distortions",title_standoff=25)
+            fig.show()
 
     def classify_traffic(self):
         # TODO: this will work with cluster
@@ -281,9 +280,9 @@ class NetCap:
         avail_check.start()
 
 if __name__ == '__main__':
-    interface = ''
-    dburl = ''
-    n = NetCap(interface)
+    interface = 'en0'
+    dburl = '192.168.1.7'
+    n = NetCap(interface,dburl)
     # n.save_stream_to_db()
     # n.create_visuals()
     # n.am_i_alive_check()
