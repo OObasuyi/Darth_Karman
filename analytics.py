@@ -281,7 +281,7 @@ class NetCap:
 
 if __name__ == '__main__':
     interface = 'en0'
-    dburl = '192.168.1.7'
+    dburl = ''
     n = NetCap(interface,dburl)
     # n.save_stream_to_db()
     # n.create_visuals()
